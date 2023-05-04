@@ -39,6 +39,7 @@ from sklearn.metrics import auc
 from captum.attr import LayerIntegratedGradients, DeepLift, DeepLiftShap, GradientShap, Saliency
 # word-level tokenizer
 from tokenizers import Tokenizer
+import torchmetrics
 
 logger = logging.getLogger(__name__)
 
@@ -63,22 +64,25 @@ class TextDataset(Dataset):
             file_path = args.test_data_file
         self.examples = []
         df = pd.read_csv(file_path)
-        funcs = df["processed_func"].tolist()
-        labels = df["target"].tolist()
-        for i in tqdm(range(len(funcs))):
-            self.examples.append(convert_examples_to_features(funcs[i], labels[i], tokenizer, args))
-        if file_type == "train":
-            for example in self.examples[:3]:
-                    logger.info("*** Example ***")
-                    logger.info("label: {}".format(example.label))
-                    logger.info("input_tokens: {}".format([x.replace('\u0120','_') for x in example.input_tokens]))
-                    logger.info("input_ids: {}".format(' '.join(map(str, example.input_ids))))
+        self.funcs = df["processed_func"].tolist()
+        self.labels = df["target"].tolist()
+        self.tokenizer = tokenizer
+        self.args = args
+        # for i in tqdm(range(len(funcs))):
+        #     self.examples.append(convert_examples_to_features(funcs[i], labels[i], tokenizer, args))
+        # if file_type == "train":
+        #     for example in self.examples[:3]:
+        #             logger.info("*** Example ***")
+        #             logger.info("label: {}".format(example.label))
+        #             logger.info("input_tokens: {}".format([x.replace('\u0120','_') for x in example.input_tokens]))
+        #             logger.info("input_ids: {}".format(' '.join(map(str, example.input_ids))))
 
     def __len__(self):
-        return len(self.examples)
+        return len(self.funcs)
 
-    def __getitem__(self, i):       
-        return torch.tensor(self.examples[i].input_ids),torch.tensor(self.examples[i].label)
+    def __getitem__(self, i):
+        ex = convert_examples_to_features(self.funcs[i], self.labels[i], self.tokenizer, self.args)
+        return torch.tensor(ex.input_ids),torch.tensor(ex.label)
 
 
 def convert_examples_to_features(func, label, tokenizer, args):
@@ -153,6 +157,9 @@ def train(args, train_dataset, model, tokenizer, eval_dataset):
 
     model.zero_grad()
 
+    acc = torchmetrics.Accuracy(task='binary')
+    acc.to(args.device)
+
     for idx in range(args.epochs): 
         bar = tqdm(train_dataloader,total=len(train_dataloader))
         tr_num = 0
@@ -169,6 +176,8 @@ def train(args, train_dataset, model, tokenizer, eval_dataset):
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
 
+            acc(logits.argmax(dim=1), labels)
+
             tr_loss += loss.item()
             tr_num += 1
             train_loss += loss.item()
@@ -176,7 +185,7 @@ def train(args, train_dataset, model, tokenizer, eval_dataset):
                 avg_loss = tr_loss
                 
             avg_loss = round(train_loss/tr_num,5)
-            bar.set_description("epoch {} loss {}".format(idx,avg_loss))
+            bar.set_description(f"epoch {idx} loss {loss:.5f} acc {acc.compute():.5f}")
               
             if (step + 1) % args.gradient_accumulation_steps == 0:
                 optimizer.step()
